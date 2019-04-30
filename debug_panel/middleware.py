@@ -4,7 +4,11 @@ Debug Panel middleware
 import threading
 import time
 
-from django.core.urlresolvers import reverse, resolve, Resolver404
+
+try:
+    from django.urls import reverse, resolve, Resolver404
+except ImportError: # django < 2.0
+    from django.core.urlresolvers import reverse, resolve, Resolver404
 from django.conf import settings
 from debug_panel.cache import cache
 import debug_toolbar.middleware
@@ -31,20 +35,41 @@ class DebugPanelMiddleware(debug_toolbar.middleware.DebugToolbarMiddleware):
     on outgoing response.
     """
 
+    def _process_request(self, request):
+        # Decide whether the toolbar is active for this request.
+        from debug_toolbar.middleware import get_show_toolbar, DebugToolbar
+
+        show_toolbar = get_show_toolbar()
+        if not show_toolbar(request):
+            return
+
+        toolbar = DebugToolbar(request)
+        self.__class__.debug_toolbars[threading.current_thread().ident] = toolbar
+
+        # Activate instrumentation ie. monkey-patch.
+        for panel in toolbar.enabled_panels:
+            panel.enable_instrumentation()
+
+        # Run process_request methods of panels like Django middleware.
+        response = None
+        for panel in toolbar.enabled_panels:
+            response = panel.process_request(request)
+            if response:
+                break
+        return response
+
     def process_request(self, request):
         """
         Try to match the request with an URL from debug_panel application.
-
         If it matches, that means we are serving a view from debug_panel,
         and we can skip the debug_toolbar middleware.
-
         Otherwise we fallback to the default debug_toolbar middleware.
         """
 
         try:
             res = resolve(request.path, urlconf=debug_panel.urls)
         except Resolver404:
-            return super(DebugPanelMiddleware, self).process_request(request)
+            return self._process_request(request)
 
         return res.func(request, *res.args, **res.kwargs)
 
@@ -52,7 +77,6 @@ class DebugPanelMiddleware(debug_toolbar.middleware.DebugToolbarMiddleware):
     def process_response(self, request, response):
         """
         Store the DebugToolbarMiddleware rendered toolbar into a cache store.
-
         The data stored in the cache are then reachable from an URL that is appened
         to the HTTP response header under the 'X-debug-data-url' key.
         """
@@ -73,3 +97,4 @@ class DebugPanelMiddleware(debug_toolbar.middleware.DebugToolbarMiddleware):
                 reverse('debug_data', urlconf=debug_panel.urls, kwargs={'cache_key': cache_key}))
 
         return response
+
